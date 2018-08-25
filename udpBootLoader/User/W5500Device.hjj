@@ -1,0 +1,58 @@
+#ifndef _W5500_DEVICE_H_
+#define _W5500_DEVICE_H_
+
+#include "stm32f4xx.h"
+#include "Singleton.h"
+#include "W5500.h"
+
+//#include "DSP28x_Project.h"
+#include <stdint.h>
+
+
+//BSP MACROS
+#define W5500_SPI				SPI1
+#define W5500_IOGROUP		GROUP_A5
+
+#define W5500_RST_GPIO	GPIOA
+#define W5500_INT_GPIO	GPIOA
+#define W5500_CS_GPIO		GPIOA
+
+#define W5500_RST_PIN		GPIO_Pin_8
+#define W5500_INT_PIN		GPIO_Pin_1
+#define W5500_CS_PIN		GPIO_Pin_4
+
+#define W5500_RST_ON	GPIO_ResetBits(W5500_RST_GPIO, W5500_RST_PIN)
+#define W5500_RST_OFF	GPIO_SetBits(W5500_RST_GPIO, W5500_RST_PIN)
+
+class CW5500Device
+{
+public:
+	int doInit();
+	int doRun();
+	uint8_t* IP();
+	uint8_t* NetMask();
+	enum{
+		IAP_SKT = 1,
+		CONSOLE_SKT = 6
+	};
+
+	void setOpen(bool open){_bOpen = open;}
+	bool isOpen()
+	{
+		return _bOpen;
+	}
+
+
+private:
+	void initW5500(void);
+	bool check5500IpMatched();
+
+private:
+	uint16_t w5500Ticks_;
+	uint16_t cnt_;
+	bool _bOpen;	//if the device can be initialized successfully, _bOpen is TRUE
+};
+
+typedef NormalSingleton<CW5500Device> W5500Device;
+
+#endif

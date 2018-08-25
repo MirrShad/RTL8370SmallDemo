@@ -1,0 +1,245 @@
+#include "W5500Device.h"
+//#include "dsp28x_project.h"
+#include <stdint.h>
+#include "socket.h"
+#include "CSpi.h"
+#include "network_conf.h"
+#include "powerupOption.h"
+#include "Console.h"
+#include "Timer.h"
+#include "HeartLed_def.h"
+
+CSpi w5500Spi(W5500_SPI);
+
+namespace{
+	uint8_t tx_mem_conf[8] = {8,8,8,8,8,8,8,8};	// for setting TMSR regsiter
+	uint8_t rx_mem_conf[8] = {8,8,8,8,8,8,8,8};   // for setting RMSR regsiter   
+	uint8_t data[20];
+	uint8_t *data_buf = &data[0];    				// buffer for loopack data   
+
+	uint8_t ip[4] = IPV4_ADDR;            // for setting SIP register
+	uint8_t gw[4] = IPV4_GATEWAY;              // for setting GAR register
+
+	uint8_t sn[4] = IPV4_SUBNETMASK;              // for setting SUBR register
+	uint8_t mac[6] = MAC_ADDR;   // for setting SHAR register
+}
+
+uint8_t* CW5500Device::IP()
+{
+	return ip;
+}
+
+uint8_t* CW5500Device::NetMask()
+{
+	return sn;
+}
+
+static int verifyIP(uint8_t* ip)
+{
+	if(0 == ip[0])
+		return -1;
+	else if(ip[0] > 223)
+		return -2;
+	else
+		return 0;
+}
+
+static int verifyGateway(uint8_t* gateway)
+{
+	return verifyIP(gateway);
+}
+
+int CW5500Device::doInit()
+{
+	setOpen(false);
+	w5500Ticks_ = 0;
+	cnt_ = 0;
+	initW5500();
+	int tempcnt = 0;
+	while(PHYCFGR_LNK_OFF == (getPHYCFGR() & PHYCFGR_LNK_ON))
+	{
+		if(++tempcnt < LINK_LED_PERIOD)
+			GPIO_SetBits(LINK_LED_GPIO, LINK_LED_PIN);
+		else if (++tempcnt < 2*LINK_LED_PERIOD)
+			GPIO_ResetBits(LINK_LED_GPIO, LINK_LED_PIN);
+		else
+			tempcnt = 0;
+	}
+	GPIO_ResetBits(LINK_LED_GPIO, LINK_LED_PIN);
+	
+	bool ipInfoVerified = true;
+	uint8_t tmpVerifier[4];
+	
+	*(uint32_t*)tmpVerifier = pvf::read(pvf::VAR_DEFA_IP);
+	if(0 != verifyIP(tmpVerifier))
+		ipInfoVerified = false;
+	
+	*(uint32_t*)tmpVerifier = pvf::read(pvf::VAR_DEFA_GATE_WAY);
+	if(0 != verifyGateway(tmpVerifier))
+		ipInfoVerified = false;
+	
+	if(ipInfoVerified)
+	{
+		*(uint32_t*)ip = pvf::read(pvf::VAR_DEFA_IP);
+		*(uint32_t*)gw = pvf::read(pvf::VAR_DEFA_GATE_WAY);
+		*(uint32_t*)sn = pvf::read(pvf::VAR_DEFA_NET_MASK);
+	}else
+	{
+//		Console::Instance()->printf("IP info valid failed, use default value\r\n");
+	}
+	
+	if(!check5500IpMatched())
+	{
+		wizchip_init(tx_mem_conf,rx_mem_conf);
+		setSHAR(&mac[0]);	/* set source hardware address */
+		getSHAR(data_buf);
+	
+		setGAR(&gw[0]);     /* set gateway IP address */	
+		getGAR(data_buf);	
+	
+		setSUBR(&sn[0]);	/* set subnet mask address */	
+		getSUBR(data_buf);	
+	
+		setSIPR(&ip[0]);    /* set source IP address */ 
+		getSIPR(data_buf);	
+		
+		BaseTimer::Instance()->delay_ms(2000);
+		Console::Instance()->printf("IP modified, delay 2s...\r\n");
+	}
+	
+	if (false == isOpen())
+	{
+		setOpen(true);
+	}
+	
+	return 0;
+}
+
+int CW5500Device::doRun()
+{
+	switch(w5500Ticks_){
+	case 0:			
+		W5500_RST_ON;	
+		w5500Ticks_ = 1;
+		break;
+
+	case 1:	/* initiate W5500 */
+		W5500_RST_OFF;
+		//iinchip_init();			
+
+		w5500Ticks_ = 2;
+		break;
+
+	case 2:			
+		cnt_++;
+		if(cnt_ > 9) w5500Ticks_ = 3;
+		break;
+
+	case 3:	/* allocate internal TX/RX memory of w5500 */
+		if(wizchip_init(tx_mem_conf,rx_mem_conf)) w5500Ticks_ = 4;
+		break;			
+
+	case 4:	/* configure network information */
+		//???setMR(getMR() | MR_RDH | MR_WDF(2));
+
+		cnt_ = 0;
+		w5500Ticks_ = 5;
+		break;
+
+	case 5:
+		cnt_++;
+		if(cnt_ > 9) w5500Ticks_ = 6;
+		break;
+
+	case 6:
+		setSHAR(&mac[0]);	/* set source hardware address */
+		getSHAR(data_buf);
+	
+		setGAR(&gw[0]);     /* set gateway IP address */	
+		getGAR(data_buf);	
+	
+		setSUBR(&sn[0]);	/* set subnet mask address */	
+		getSUBR(data_buf);	
+	
+		setSIPR(&ip[0]);    /* set source IP address */ 
+		getSIPR(data_buf);	
+
+		w5500Ticks_ = 7;
+		break;	
+
+	case 7:
+		/* maybe set breakpoint at HERE */
+		if (false == isOpen())
+		{
+			setOpen(true);
+		}
+		break;	
+	}
+	return 0;
+}/* end of w5500Task() */
+
+bool CW5500Device::check5500IpMatched()
+{
+	getSHAR(data_buf);
+	if(0 != memcmp(data_buf, mac, 6))
+		return false;
+	
+	getGAR(data_buf);
+	if(0 != memcmp(data_buf, gw, 4))
+		return false;
+	
+	getSUBR(data_buf);
+	if(0 != memcmp(data_buf, sn, 4))
+		return false;
+	
+	getSIPR(data_buf);
+	if(0 != memcmp(data_buf, ip, 4))
+		return false;
+	
+	return true;
+}
+
+void CW5500Device::initW5500(void)
+{
+	w5500Spi.InitSpiGpio();
+	
+	uint32_t RCC_AHB1Periph_GPIOx;
+	GPIO_InitTypeDef GPIO_InitStructure; 
+	
+	/* open clock of RST */
+	RCC_AHB1Periph_GPIOx	= RCC_AHB1Periph_GPIOA<< (((uint32_t)W5500_RST_GPIO-(uint32_t)GPIOA)/0x400);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOx, ENABLE);
+	
+	/* open clock of INT */
+	RCC_AHB1Periph_GPIOx	= RCC_AHB1Periph_GPIOA<< (((uint32_t)W5500_INT_GPIO-(uint32_t)GPIOA)/0x400);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOx, ENABLE);
+	
+	/* open clock of nCS */
+	RCC_AHB1Periph_GPIOx	= RCC_AHB1Periph_GPIOA<< (((uint32_t)W5500_CS_GPIO-(uint32_t)GPIOA)/0x400);
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOx, ENABLE);
+	
+	/* Config Pin: RST nCS*/	
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
+	GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
+	GPIO_InitStructure.GPIO_Pin = W5500_RST_PIN;
+	W5500_RST_OFF;
+	GPIO_Init(W5500_RST_GPIO, &GPIO_InitStructure);
+	
+	GPIO_InitStructure.GPIO_Pin = W5500_CS_PIN;
+	GPIO_Init(W5500_CS_GPIO, &GPIO_InitStructure);
+	
+	/* Config Pin: INT */	
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN;
+	GPIO_InitStructure.GPIO_PuPd = GPIO_PuPd_UP;
+	GPIO_InitStructure.GPIO_Pin = W5500_INT_PIN;
+	GPIO_Init(W5500_INT_GPIO, &GPIO_InitStructure);
+	
+	W5500_RST_OFF;
+	GPIO_SetBits(W5500_CS_GPIO, W5500_CS_PIN);
+	
+	w5500Spi.InitSpi();
+}/* end of initW5500() */
+
+//end of file

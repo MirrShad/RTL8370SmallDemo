@@ -1,0 +1,3 @@
+[submodule "iapTool"]
+	path = iapTool
+	url = https://github.com/MirrShad/iapTool.git
